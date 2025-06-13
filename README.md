@@ -26,6 +26,7 @@ De esta manera, y con el hipnoss.pt en la carpeta de main, el modelo puede ser e
     sudo apt-get install python3-pip y pip3 install virtualenv para poder crear el entorno y usar pip desde ahí)
 
 Ejecutar en la terminal del entorno:
+
     - pip install supervision
     - pip install ultralytics
     - pip install opencv-python
@@ -35,6 +36,7 @@ Ejecutar en la terminal del entorno:
     - pip install pyserial
     - pip install rplidar
     - pip install matplotlib
+
 
 Una vez instaladas todas las librerías, y con todos los archivos en el mismo directorio, el proyecto puede ser ejecutado
 En caso de obtener una advertencia de tipo 'no module named ...', instalar esa librería.
