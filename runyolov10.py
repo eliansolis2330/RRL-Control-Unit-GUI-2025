@@ -5,7 +5,7 @@ import os
 import math
 
 # Carga el modelo previamente entrenado
-model = YOLOv10('NixitoS.pt.pt')
+model = YOLOv10('NixitoS.pt')
 
 # Inicializa los anotadores para las cajas de detección y las etiquetas
 boundingBoxAnnotator = sv.BoundingBoxAnnotator()

@@ -1,119 +1,137 @@
-#!/usr/bin/env python3
-import os
 import subprocess
-import argparse
-from pathlib import Path
+import os
+import time
 
-# CONFIGURACIÓN MANUAL - EDITA ESTA RUTA CON LA UBICACIÓN DE TU REPOSITORIO
-REPO_PATH = "/ruta/completa/al/repositorio/gopro_as_webcam_on_linux"  # <-- CAMBIAR ESTO
+# --- Constantes ---
+# Nombre del repositorio de GoPro
+REPO_NAME = "gopro_as_webcam_on_linux"
+# Ruta absoluta al directorio principal del usuario (~/)
+HOME_DIR = os.path.expanduser("~")
+# Ruta completa al repositorio de GoPro
+REPO_PATH = os.path.join(HOME_DIR, REPO_NAME)
+# Contraseña de administrador
+ADMIN_PASSWORD = "0120" # ¡ADVERTENCIA DE SEGURIDAD! Considera métodos más seguros para entornos de producción.
 
+# --- Funciones de Utilidad ---
 
-def configure_gopro_webcam():
-    # Verificar la ruta del repositorio
-    repo_dir = Path(REPO_PATH).expanduser().absolute()
-    script_path = repo_dir / "gopro_as_webcam.sh"
+def run_sudo_command(command, cwd=None, input_data=None, check_errors=True):
+    """
+    Ejecuta un comando con sudo, pasando la contraseña a través de STDIN usando sudo -S.
 
-    if not script_path.exists():
-        print(f"Error: No se encontró el script gopro_as_webcam.sh en {repo_dir}")
-        print("Por favor edita la variable REPO_PATH en este script con la ruta correcta")
-        return False
+    Args:
+        command (list): Lista de strings que representan el comando y sus argumentos.
+        cwd (str, optional): Directorio de trabajo para el comando. Por defecto, None.
+        input_data (str, optional): Datos adicionales para enviar al STDIN del comando (después de la contraseña).
+        check_errors (bool, optional): Si es True, lanza una excepción si el comando falla. Por defecto, True.
 
-    print(f"Usando repositorio en: {repo_dir}")
+    Returns:
+        subprocess.CompletedProcess: El objeto que representa el resultado del comando.
+    """
+    # Prepend 'sudo -S' para que sudo lea la contraseña desde stdin
+    full_command = ["sudo", "-S"] + command
+    command_str = ' '.join(full_command)
+    print(f"\nEjecutando: {command_str}")
 
-    # Configurar parámetros (puedes editar estos valores también)
-    fov = "wide"
-    resolution = "480"
-    auto_start = True
-
-    print("\nConfigurando GoPro como webcam...")
-    print(f"• FOV: {fov}")
-    print(f"• Resolución: {resolution}p")
-    print(f"• Auto-start: {'Activado' if auto_start else 'Desactivado'}\n")
-
-    # Construir el comando
-    cmd = [str(script_path), f"--fov={fov}", f"--resolution={resolution}"]
-    if auto_start:
-        cmd.append("--auto-start")
+    # Combinamos la contraseña con cualquier otro input_data
+    # Agregamos un salto de línea después de la contraseña para simular el Enter
+    combined_input = ADMIN_PASSWORD + "\n"
+    if input_data:
+        combined_input += input_data
 
     try:
-        # Cambiar al directorio del repositorio
-        original_dir = os.getcwd()
-        os.chdir(repo_dir)
-
-        # Verificar permisos del script
-        if not os.access("gopro_as_webcam.sh", os.X_OK):
-            print("Otorgando permisos de ejecución al script...")
-            os.chmod("gopro_as_webcam.sh", 0o755)
-
-        # Ejecutar el comando
-        print("Ejecutando:", " ".join(cmd))
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+        process = subprocess.run(
+            full_command,
+            cwd=cwd,
+            stdin=subprocess.PIPE, # Necesario para enviar datos a stdin
+            input=combined_input, # Este 'input' es el que se pasa al argumento 'input' de subprocess.run
+            capture_output=True,
             text=True,
-            bufsize=1,
-            universal_newlines=True
+            check=check_errors
         )
-
-        # Mostrar salida en tiempo real
-        for line in process.stdout:
-            print(line, end='')
-
-        # Esperar a que termine y verificar errores
-        process.wait()
-        if process.returncode != 0:
-            print("\nError al ejecutar el script:")
-            print(process.stderr.read())
-            return False
-
-        print("\n✅ Configuración completada exitosamente!")
-        return True
-
+        if process.stdout:
+            print("STDOUT:")
+            print(process.stdout)
+        if process.stderr:
+            print("STDERR:")
+            print(process.stderr)
+        return process
+    except subprocess.CalledProcessError as e:
+        print(f"Error al ejecutar '{command_str}': {e}")
+        print(f"STDOUT: {e.stdout}")
+        print(f"STDERR: {e.stderr}")
+        raise
     except FileNotFoundError:
-        print("Error: No se encontró el script gopro_as_webcam.sh")
-        return False
+        print(f"Error: El comando '{full_command[0]}' no se encontró. Asegúrate de que esté instalado y en tu PATH.")
+        raise
     except Exception as e:
-        print(f"\n❌ Error inesperado: {str(e)}")
-        return False
-    finally:
-        # Volver al directorio original
-        os.chdir(original_dir)
+        print(f"Ocurrió un error inesperado al ejecutar '{command_str}': {e}")
+        raise
 
+def ensure_repo_exists():
+    """
+    Verifica si el directorio del repositorio de GoPro existe en la ruta esperada.
+    Si no, imprime un error y sale del script.
+    """
+    if not os.path.exists(REPO_PATH) or not os.path.isdir(REPO_PATH):
+        print(f"Error: El directorio del repositorio '{REPO_PATH}' no se encontró.")
+        print(f"Asegúrate de que el repositorio '{REPO_NAME}' esté clonado en tu directorio de usuario (~/).")
+        print("Puedes clonarlo usando: git clone https://github.com/jschmid1/gopro_as_webcam_on_linux.git")
+        exit(1)
+    print(f"Repositorio '{REPO_NAME}' encontrado en '{REPO_PATH}'.")
+
+# --- Lógica Principal de Automatización ---
+
+def main():
+    print("Iniciando la automatización para configurar tu GoPro como webcam...")
+
+    # 1. Verificar y confirmar la existencia del repositorio
+    ensure_repo_exists()
+    print(f"Los comandos se ejecutarán desde el directorio: {REPO_PATH}")
+
+    try:
+        # cd gopro_as_webcam_on_linux/ [enter] -> Esto se maneja con `cwd=REPO_PATH` en cada comando.
+
+        # sudo ./install.sh [enter] 0120 [enter]
+        print("\n--- Ejecutando el script de instalación (sudo ./install.sh) ---")
+        # El 'input_data="\n"' es el primer Enter que el script install.sh pide *antes* de la contraseña.
+        # La contraseña '0120\n' se envía automáticamente por run_sudo_command.
+        run_sudo_command(["./install.sh"], cwd=REPO_PATH, input_data="\n")
+        print("El script de instalación se ejecutó. Si hubo alguna pregunta adicional, asegúrate de haberla respondido.")
+
+        # sudo gopro webcam -f wide [enter] [enter]
+        print("\n--- Configurando GoPro webcam: Modo Wide (sudo gopro webcam -f wide) ---")
+        # Dos "enters" para el input_data
+        run_sudo_command(["gopro", "webcam", "-f", "wide"], cwd=REPO_PATH, input_data="\n\n")
+        print("Modo Wide configurado.")
+
+        # [4 seg]
+        print("Esperando 4 segundos...")
+        time.sleep(4)
+
+        # sudo gopro webcam -r 480 [enter] [enter]
+        print("\n--- Configurando GoPro webcam: Resolución 480p (sudo gopro webcam -r 480) ---")
+        # Dos "enters" para el input_data
+        run_sudo_command(["gopro", "webcam", "-r", "480"], cwd=REPO_PATH, input_data="\n\n")
+        print("Resolución 480p configurada.")
+
+        # [4 seg]
+        print("Esperando 4 segundos...")
+        time.sleep(4)
+
+        # sudo gopro webcam -a [enter] [enter]
+        print("\n--- Activando GoPro webcam (sudo gopro webcam -a) ---")
+        # Dos "enters" para el input_data
+        run_sudo_command(["gopro", "webcam", "-a"], cwd=REPO_PATH, input_data="\n\n")
+        print("GoPro webcam activada.")
+
+        print("\n¡Configuración y activación de tu GoPro como webcam completadas exitosamente!")
+        print("Ahora puedes usar tu GoPro en aplicaciones como OBS Studio, VLC, o cualquier otra que soporte cámaras web.")
+        print("Para detener la webcam, es probable que necesites ejecutar 'sudo gopro webcam -d' o simplemente desconectar la GoPro.")
+
+    except Exception as e:
+        print(f"\n¡Se produjo un error durante la automatización! Por favor, revisa los mensajes anteriores para más detalles.")
+        print(f"Error específico: {e}")
+        print("Asegúrate de que tu GoPro esté conectada y encendida en modo webcam, y de que los permisos de sudo sean correctos.")
 
 if __name__ == "__main__":
-    # Configuración de argumentos (opcional)
-    parser = argparse.ArgumentParser(
-        description='Configura GoPro como webcam en Linux',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=f"""Ejemplos de uso:
-  {os.path.basename(__file__)}                  # Usa configuración por defecto
-  {os.path.basename(__file__)} --fov linear     # Cambia FOV a linear
-  {os.path.basename(__file__)} --resolution 720 # Usa resolución 720p
-  {os.path.basename(__file__)} --no-auto-start  # Desactiva auto-start"""
-    )
-
-    parser.add_argument('--fov', default='wide',
-                        help='Campo de visión (wide, linear, narrow)')
-    parser.add_argument('--resolution', default='480',
-                        help='Resolución (480, 720, 1080)')
-    parser.add_argument('--no-auto-start', action='store_false', dest='auto_start',
-                        help='Desactivar inicio automático')
-
-    args = parser.parse_args()
-
-    # Ejecutar la configuración
-    success = configure_gopro_webcam()
-
-    if not success:
-        print("\n🔧 Sugerencias para solución de problemas:")
-        print("1. Verifica que la variable REPO_PATH en el script apunta al directorio correcto")
-        print("2. Asegúrate que la GoPro está en modo USB (Cámara GoPro)")
-        print("3. Confirma que tienes instalados los requisitos:")
-        print("   - ffmpeg")
-        print("   - v4l2loopback-dkms")
-        print("   - v4l2loopback-utils")
-        print("4. Revisa que el script gopro_as_webcam.sh existe y tiene permisos de ejecución")
-        print("\nPara más ayuda, consulta: https://github.com/jschmid1/gopro_as_webcam_on_linux")
-
-        exit(1)
+    main()
