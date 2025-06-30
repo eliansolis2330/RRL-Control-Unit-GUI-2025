@@ -8,8 +8,9 @@ import time
 
 # --- Configuration Constants (Moved to top for easy access and modification) ---
 COLOR_THEME = '#12fe35'
-SERIAL_PORT = "/dev/ttyTHS0"
-BAUD_RATE = 112500
+SERIAL_PORT = "/dev/ttyUSB1" # !!! IMPORTANTE: Verifica que este sea el puerto correcto.
+                             # Para ESP32 por USB, suele ser '/dev/ttyUSB0' o '/dev/ttyACM0'.
+BAUD_RATE = 9600             # !!! IMPORTANTE: BAUD RATE COINCIDE CON TU ESP32 (Serial1.begin(9600))
 
 LIDAR_BAUD_RATE = 256000
 LIDAR_TIMEOUT = 0.05
@@ -23,18 +24,33 @@ LINUX_DEVICE_PATH = '/dev/ttyUSB0'
 
 # Flipper animation constants
 FLIPPER_AXIS_X, FLIPPER_AXIS_Y, FLIPPER_LENGTH, FLIPPER_WIDTH = 180, 145, 90, 25
+# IMPORTANT: Adjust this value based on the actual maximum reading from your encoders
+# Si los encoders son de 10 bits y se leen analógicamente directamente, 1023.
+# Si son Modbus, su rango puede ser diferente (ej. 0-360, o 0-65535 para 16-bit).
+# Por ahora, mantengamos un valor que pueda acomodar 0-360 como ejemplo.
+ENCODER_MAX_VALUE = 360 # Placeholder: Ajusta esto al rango máximo real de tus encoders
+FLIPPER_ANGLE_RANGE = 80 # Max angle deviation from center (e.g., -80 to +80 degrees)
 
 # --- Global Variables (for shared state, minimized) ---
 lidar_inst, lidar_anim, lidar_line, lidar_ax, lidar_fig, lidar_canvas_tkagg = [None] * 6
 active_cam_caps, cam_stop_events = {}, {}
 ser = None # Serial connection for ESP32
+# Global variable to store the latest sensor/encoder data
+current_sensor_data = {
+    "e1": 0, "e2": 0, "e3": 0, "e4": 0, "e5": 0,
+    "mq2": 0, "ky024": 0
+}
+data_lock = threading.Lock() # To protect access to current_sensor_data
 
 # Attempt serial connection
 try:
-    ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0.01)
-    print("Conexión ESP32 establecida")
+    ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0.01) # Timeout corto para lectura no bloqueante
+    print(f"Conexión ESP32 establecida en {SERIAL_PORT} @ {BAUD_RATE} baudios.")
 except (serial.SerialException, Exception) as e:
-    print(f"Error serial: {e}. Continuando sin conexión.")
+    print(f"Error serial al conectar con ESP32: {e}. Continuando sin conexión serial.")
+    print(f"Por favor, verifica el SERIAL_PORT ({SERIAL_PORT}) y BAUD_RATE ({BAUD_RATE}).")
+    print("También, asegúrate de tener permisos: 'sudo usermod -a -G dialout $USER' y reinicia o 'sudo chmod 666 {SERIAL_PORT}'")
+
 
 # --- Helper Functions ---
 def config_lidar_plot(parent_frame):
@@ -66,19 +82,89 @@ def start_lidar_anim():
     lidar_fig.canvas.mpl_connect("close_event", stop_lidar_anim); lidar_fig.canvas.draw_idle()
     print("Anim. LIDAR iniciada.")
 
-def read_sensors():
-    if not (ser and ser.is_open): return None, None
+# This function now reads ALL data and updates the global `current_sensor_data` dictionary
+def read_and_update_sensor_data():
+    global ser, current_sensor_data, data_lock
+    if not (ser and ser.is_open):
+        return # Do nothing if serial is not open
+
     try:
-        line = "";
-        while ser.in_waiting > 0: line = ser.readline().decode('utf-8').strip()
-        return (int(v) for v in line.split(",")) if len(line.split(",")) == 2 else (None, None)
-    except Exception as e: print(f"Err lectura sen: {e}"); return None, None
+        # Clear the input buffer to get the latest data
+        # while ser.in_waiting: # Read all pending data
+        #     ser.read() # Read and discard bytes
+
+        line = ""
+        # Read the *last* complete line available in the buffer
+        # This loop ensures we process the most recent full line
+        while ser.in_waiting > 0:
+            current_line_bytes = ser.readline()
+            try:
+                current_line = current_line_bytes.decode('utf-8').strip()
+                if current_line: # Only update if the line is not empty
+                    line = current_line
+            except UnicodeDecodeError:
+                # print(f"Error de decodificación: {current_line_bytes}")
+                pass # Skip malformed lines
+
+        if line:
+            # print(f"Python recibió línea: '{line}'") # Debugging line
+            # Expected format: e1,e2,e3,e4,e5,mq2,ky024
+            values = line.split(",")
+            if len(values) == 7:
+                try:
+                    new_data = {
+                        "e1": int(values[0]),
+                        "e2": int(values[1]),
+                        "e3": int(values[2]),
+                        "e4": int(values[3]),
+                        "e5": int(values[4]),
+                        "mq2": int(values[5]),
+                        "ky024": int(values[6])
+                    }
+                    with data_lock: # Protect shared data with a lock
+                        current_sensor_data.update(new_data)
+                    # print(f"Datos actualizados: {current_sensor_data}") # Debugging line
+                except ValueError:
+                    print(f"Error parseando valores a int: {line}. Saltando actualización.")
+            # else:
+                # print(f"Error: Longitud de valores incorrecta ({len(values)}). Línea: '{line}'. Saltando actualización.")
+    except Exception as e:
+        print(f"Error general en read_and_update_sensor_data: {e}");
+
+# Dedicated thread for continuous serial reading
+def serial_read_thread_func():
+    while True: # Run indefinitely until the application closes
+        # print("Hilo serial activo...") # Debugging line to confirm thread is running
+        read_and_update_sensor_data()
+        time.sleep(0.05) # Read approximately every 50ms (20 times per second)
+
+# Start the serial reading thread at application start
+# This thread is started once when the script runs.
+# It should be a daemon thread so it exits when the main app exits.
+serial_thread = threading.Thread(target=serial_read_thread_func, daemon=True)
+serial_thread.start()
+
+
+# Sensor reading functions now simply retrieve from the global dictionary
+def get_sensor_value(key, default=0):
+    with data_lock:
+        return current_sensor_data.get(key, default)
 
 def read_magnetometer():
-    _, mag = read_sensors(); return int((mag / 4095.0) * 1000) if mag is not None else 0
+    mag_val = get_sensor_value("ky024")
+    print('valor del fakin magnetómetro; ', mag_val)
+    # Assuming KY024 max value is 4095 from ESP32 analogReadResolution(12)
+    # Adjust 4095.0 if your KY024 sensor range is different or you're scaling it.
+    # The ESP32 code reads it directly. Scaling to 0-1000 range.
+    return int((mag_val / 4095.0) * 1000) if mag_val is not None else 0
 
 def read_mq7_sensor():
-    gas, _ = read_sensors(); return int(gas - 100) if gas is not None and gas > 100 else 0
+    gas_val = get_sensor_value("mq2")
+    print('valor del fakin mq: ',gas_val)
+    # The ESP32 code reads MQ2 directly. The -100 is an arbitrary offset from previous logic.
+    # Adjust this logic based on actual MQ7 calibration if needed.
+    return int(gas_val - 100) if gas_val is not None and gas_val > 100 else 0
+
 
 def run_script(script):
     try: subprocess.run(["python3", script], check=True)
@@ -87,26 +173,74 @@ def run_script(script):
 def exec_script_thread(script): threading.Thread(target=run_script, args=(script,), daemon=True).start()
 
 def create_flippers_anim(canvas):
-    colors = ["#00ffff", COLOR_THEME]; flipper_angles, direction = [0, 0], 1
-    def draw_rounded_rect(x1, y1, x2, y2, r=30, **kwargs):
-        pts = [x1+r, y1, x2-r, y1, x2, y1, x2, y1+r, x2, y2-r, x2, y2, x2-r, y2, x1+r, y2, x1, y2, x1, y2-r, x1, y1+r, x1, y1]
-        return canvas.create_polygon(pts, **kwargs, smooth=True, tag="flipper")
-    def draw_flippers():
-        canvas.delete("flipper"); draw_rounded_rect(40, 130, 250, 160, r=25, fill="#333333", outline=COLOR_THEME, width=3)
-        for i in range(2):
-            angle_rad = math.radians(flipper_angles[i]); end_x = FLIPPER_AXIS_X + FLIPPER_LENGTH * math.cos(angle_rad)
-            end_y = FLIPPER_AXIS_Y - FLIPPER_LENGTH * math.sin(angle_rad)
-            canvas.create_line(FLIPPER_AXIS_X, FLIPPER_AXIS_Y, end_x, end_y, fill=colors[i], width=FLIPPER_WIDTH, capstyle="round", tag="flipper")
-            if i == 0: canvas.create_oval(FLIPPER_AXIS_X-18, FLIPPER_AXIS_Y-18, FLIPPER_AXIS_X+18, FLIPPER_AXIS_Y+18, fill="#444444", outline="white", width=2, tag="flipper")
-    def update_flippers():
-        nonlocal flipper_angles, direction; flipper_angles[0] += direction * 1; flipper_angles[1] -= direction * 1
-        if flipper_angles[0] > 80 or flipper_angles[0] < -80: direction *= -1
-        draw_flippers(); canvas.after(40, update_flippers)
-    update_flippers()
+    colors = ["#00ffff", COLOR_THEME] # Flipper 1 (celeste), Flipper 2 (verde)
+    flipper_lines = [None, None]
+    flipper_circle = None
 
-def update_air_quality(label): label.configure(text=f"CO: {read_mq7_sensor()} PPM"); label.after(1000, update_air_quality, label)
+    def draw_flippers(e1_angle, e2_angle):
+        nonlocal flipper_lines, flipper_circle
+        canvas.delete("flipper") # Clear previous drawings
 
-def update_magnetometer(label): label.configure(text=f"Mag: {read_magnetometer()}"); label.after(1000, update_magnetometer, label)
+        # Draw the base rectangle (body of the robot)
+        canvas.create_rectangle(40, 130, 250, 160, fill="#333333", outline=COLOR_THEME, width=3, tag="flipper")
+
+        # Flipper 1 (celeste - controlled by e1)
+        # Angles in Tkinter's canvas are usually standard (0 right, increases counter-clockwise)
+        # But for physical flippers, you might want 0 at "straight" and then positive/negative angles
+        # The -math.sin(angle_rad) is for standard cartesian-to-canvas y-axis flip.
+        angle_rad_e1 = math.radians(e1_angle)
+        end_x1 = FLIPPER_AXIS_X + FLIPPER_LENGTH * math.cos(angle_rad_e1)
+        end_y1 = FLIPPER_AXIS_Y - FLIPPER_LENGTH * math.sin(angle_rad_e1) # Y-axis is inverted in canvas
+        flipper_lines[0] = canvas.create_line(FLIPPER_AXIS_X, FLIPPER_AXIS_Y, end_x1, end_y1,
+                                                fill=colors[0], width=FLIPPER_WIDTH, capstyle="round", tag="flipper")
+
+        # Flipper 2 (verde - controlled by e2)
+        angle_rad_e2 = math.radians(e2_angle)
+        end_x2 = FLIPPER_AXIS_X + FLIPPER_LENGTH * math.cos(angle_rad_e2)
+        end_y2 = FLIPPER_AXIS_Y - FLIPPER_LENGTH * math.sin(angle_rad_e2) # Y-axis is inverted in canvas
+        flipper_lines[1] = canvas.create_line(FLIPPER_AXIS_X, FLIPPER_AXIS_Y, end_x2, end_y2,
+                                                fill=colors[1], width=FLIPPER_WIDTH, capstyle="round", tag="flipper")
+
+        # Draw the central circle (pivot point)
+        flipper_circle = canvas.create_oval(FLIPPER_AXIS_X - 18, FLIPPER_AXIS_Y - 18,
+                                             FLIPPER_AXIS_X + 18, FLIPPER_AXIS_Y + 18,
+                                             fill="#444444", outline="white", width=2, tag="flipper")
+
+    # This function will be called repeatedly to update flipper angles from encoder data
+    def update_flipper_angles():
+        with data_lock:
+            e1_val = current_sensor_data["e1"]
+            e2_val = current_sensor_data["e2"]
+
+        # Map encoder values to a desired angle range (e.g., -FLIPPER_ANGLE_RANGE to +FLIPPER_ANGLE_RANGE degrees)
+        # Assuming encoder range 0 to ENCODER_MAX_VALUE maps to -FLIPPER_ANGLE_RANGE to +FLIPPER_ANGLE_RANGE
+        # If your encoders return negative values or different range, adjust mapping as needed.
+        # This formula maps:
+        # 0 -> -FLIPPER_ANGLE_RANGE
+        # ENCODER_MAX_VALUE/2 -> 0
+        # ENCODER_MAX_VALUE -> +FLIPPER_ANGLE_RANGE
+
+        angle1 = ((e1_val / ENCODER_MAX_VALUE) * (2 * FLIPPER_ANGLE_RANGE)) - FLIPPER_ANGLE_RANGE
+        angle2 = ((e2_val / ENCODER_MAX_VALUE) * (2 * FLIPPER_ANGLE_RANGE)) - FLIPPER_ANGLE_RANGE
+
+        # Draw the flippers with the new angles
+        draw_flippers(angle1, angle2)
+
+        # Schedule the next update (e.g., every 50ms for 20 FPS on flippers)
+        canvas.after(50, update_flipper_angles)
+
+    # Start the flipper angle updates immediately after the GUI is ready
+    # Initial call to set up the flippers and start the update loop
+    update_flipper_angles()
+
+
+def update_air_quality(label):
+    label.configure(text=f"CO: {read_mq7_sensor()} PPM")
+    label.after(1000, update_air_quality, label)
+
+def update_magnetometer(label):
+    label.configure(text=f"Mag: {read_magnetometer()}")
+    label.after(1000, update_magnetometer, label)
 
 def update_video_thread(cap, label, stop_event):
     while not stop_event.is_set() and cap.isOpened():
@@ -151,9 +285,9 @@ def create_lidar_inst():
         lidar_inst = lidar; return lidar
     except (RPLidarException, OSError) as e: print(f"Error init LIDAR: {e}\nSolución: 1.USB 2.chmod 666 /dev/ttyUSB0 3.Reconectar"); return None
 
-def update_frame_lidar(frame_num): # Use frame_num if generator is used, otherwise it's just a dummy argument
+def update_frame_lidar(frame_num): # frame_num argument is expected by FuncAnimation, even if not used with a generator
     global lidar_line, lidar_ax, lidar_inst, lidar_fig
-    if lidar_inst is None or lidar_line is None or lidar_ax is None: return () # Return empty tuple for blit=True
+    if lidar_inst is None or lidar_line is None or lidar_ax is None: return ()
     try:
         if not hasattr(lidar_inst, 'iter_scans'): print("LIDAR inst. no es RPLidar."); return ()
         scan = next(lidar_inst.iter_scans(max_buf_meas=LIDAR_SCAN_BUFFER, min_len=3))
@@ -232,7 +366,7 @@ def create_gui():
 
     # Button Frame
     button_frame = ctk.CTkFrame(root, height=50, fg_color="black"); button_frame.pack(fill="x")
-    btn_data = [('Detectar Movimiento', "movementDetection.py"), ("Cámara Térmica", "thermalCamera.py"),
+    btn_data = [('Detectar Movimiento', "movementDetection.py"), ('Lectura QR', "qrDetector.py"), ("Cámara Térmica", "thermalCamera.py"),
                 ("YOLOv10", "runyolov10.py"), ("SLAM", "slam.py"), ("Diagrama Cinemático", "kinematic_diagram.py")]
     for text, script in btn_data:
         ctk.CTkButton(button_frame, text=text, width=210, height=40, font=("Arial", 18, "bold"), text_color="black",
@@ -271,6 +405,7 @@ def create_gui():
     flipper_frame = ctk.CTkFrame(widget_frame, fg_color="#1e1e1e", corner_radius=17, border_width=2, border_color=COLOR_THEME); flipper_frame.grid(row=0, column=0, pady=10, padx=10, sticky="nsew")
     ctk.CTkLabel(flipper_frame, text="Estado Flippers", font=("Arial", 18, "bold"), text_color="white").pack(pady=5)
     flipper_canvas = ctk.CTkCanvas(flipper_frame, bg="#1e1e1e", highlightthickness=0); flipper_canvas.pack(expand=True, fill="both")
+    # Initialize flippers controlled by encoders (calls update_flipper_angles() internally)
     root.after(100, lambda: create_flippers_anim(flipper_canvas))
 
     # LIDAR Widget

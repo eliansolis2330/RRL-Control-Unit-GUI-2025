@@ -16,7 +16,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolb
 from os import path
 import time
 
-colorTheme = '#12fe35'
+colorTheme = '#12fe35'  # Este es el color verde
 SERIAL_PORT = "/dev/ttyTHS0"
 BAUD_RATE = 115200
 
@@ -37,34 +37,19 @@ lidar_ax = None
 lidar_fig = None
 lidar_canvas_tkagg = None
 
-# Variables globales para el brazo robótico
-robot_arm_ani = None
-robot_arm_line1 = None
-robot_arm_line2 = None
-robot_arm_line3 = None
-robot_arm_fig = None
-robot_arm_ax = None
-robot_arm_joint_points = None  # Para los marcadores de las articulaciones
+# Las variables globales del brazo robótico se eliminan de aquí
+# ya que ahora estarán en el script independiente.
+# ROBOT_ARM_POSES, POSE_TRANSITION_FRAMES también se mueven al script.
 
-# Poses definidas para el movimiento del brazo (theta1, theta2, theta3) en radianes
-# Estas poses se han elegido para simular un movimiento "realista"
-# theta1: ángulo de la base (plano XY)
-# theta2: ángulo de la primera articulación (elevación/descenso)
-# theta3: ángulo de la segunda articulación (extensión/retracción)
-ROBOT_ARM_POSES = [
-    (0, np.pi / 4, np.pi / 4),  # Pose inicial (brazo ligeramente elevado)
-    (np.pi / 3, np.pi / 6, np.pi / 3),  # Moverse a la derecha, extender un poco
-    (-np.pi / 4, np.pi / 2, 0),  # Moverse a la izquierda, más elevado, más recto
-    (0, np.pi / 8, np.pi / 2),  # Centro, extender más
-    (np.pi / 6, np.pi / 4, np.pi / 6)  # Otra pose de trabajo
-]
-POSE_TRANSITION_FRAMES = 50  # Número de frames para transicionar entre cada pose
-
+ser = None  # Inicializar ser como None para un manejo seguro
 try:
     ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0.01)
     print("Conexión establecida con ESP32")
 except serial.SerialException:
-    print("No se pudo abrir el puerto serie")
+    print("No se pudo abrir el puerto serie. Continuando sin conexión serial.")
+except Exception as e:
+    print(f"Error inesperado al intentar abrir el puerto serial: {e}. Continuando sin conexión serial.")
+
 
 def configure_lidar_plot(parent_frame):
     global lidar_fig, lidar_ax, lidar_line, lidar_canvas_tkagg
@@ -109,13 +94,7 @@ def configure_lidar_plot(parent_frame):
     lidar_canvas_tkagg = canvas_tkagg
 
     return fig, ax, line, canvas_tkagg
-# --- FIN DE configure_lidar_plot MOVIDA ---
 
-try:
-    ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0.01)
-    print("Conexión establecida con ESP32")
-except serial.SerialException:
-    print("No se pudo abrir el puerto serie")
 
 def start_lidar_animation():
     global lidar_ani, lidar_instance, lidar_line, lidar_ax, lidar_fig
@@ -126,12 +105,8 @@ def start_lidar_animation():
             print("No se pudo iniciar el LIDAR, la animación no se iniciará.")
             return
 
-    # Esta parte se asegura de que el gráfico ya esté configurado antes de iniciar la animación
     if lidar_line is None or lidar_ax is None or lidar_fig is None:
         print("Gráfico LIDAR no configurado. Llamando a configure_lidar_plot primero.")
-        # Opcional: podrías llamar configure_lidar_plot(lidar_frame) aquí si quieres que se auto-configure
-        # Esto requeriría pasar lidar_frame como argumento o hacer que lidar_frame sea global.
-        # Por ahora, asumimos que configure_lidar_plot ya fue llamada en create_gui.
         return
 
     INTERVAL = int(1000 / LIDAR_FRAME_RATE)
@@ -146,24 +121,31 @@ def start_lidar_animation():
     lidar_fig.canvas.mpl_connect("close_event", stop_lidar_animation)
     lidar_fig.canvas.draw_idle()
 
+
 def read_sensors():
-    try:
-        while ser.in_waiting > 0:
-            line = ser.readline().decode('utf-8').strip()
-        values = line.split(",")
-        if len(values) == 2:
-            gas_value = int(values[0])
-            mag_analog = int(values[1])
-            return gas_value, mag_analog
-    except Exception as e:
-        print(f"Error al leer los sensores: {e}")
-    return None, None
+    global ser  # Asegurarse de usar la variable global 'ser'
+    if ser and ser.is_open:  # Verificar si la conexión serial está abierta
+        try:
+            line = ""
+            while ser.in_waiting > 0:
+                line = ser.readline().decode('utf-8').strip()  # Leer la última línea disponible
+            if line:
+                values = line.split(",")
+                if len(values) == 2:
+                    gas_value = int(values[0])
+                    mag_analog = int(values[1])
+                    return gas_value, mag_analog
+            return None, None
+        except Exception as e:
+            print(f"Error al leer los sensores: {e}")
+            return None, None
+    return None, None  # Retornar None si la conexión serial no está disponible
 
 
 def read_magnetometer():
     _, mag_analog = read_sensors()
     if mag_analog is not None:
-        scaled_value = (mag_analog - 1800) / 1800 * 550
+        scaled_value = (mag_analog / 4095.0) * 1000  # Escalar a un rango más manejable (0-1000)
         return int(scaled_value)
     return 0
 
@@ -172,15 +154,23 @@ def read_mq7_sensor():
     gas_value, _ = read_sensors()
     if gas_value is not None:
         ppm = gas_value
-        return int(ppm - 100)
+        return int(ppm - 100) if ppm > 100 else 0  # Asegurarse de que no sea negativo
     return 0
 
 
 def run_script(script_name):
     try:
+        # Aquí se asume que los scripts están en el mismo directorio que main_gui.py
+        # Si están en un subdirectorio, ajusta la ruta.
+        # Por ejemplo: subprocess.run(["python3", "./scripts/" + script_name], check=True)
         subprocess.run(["python3", script_name], check=True)
     except subprocess.CalledProcessError as e:
         print(f"Error al ejecutar {script_name}: {e}")
+    except FileNotFoundError:
+        print(
+            f"Error: El script '{script_name}' no se encontró. Asegúrate de que la ruta sea correcta y el script exista.")
+    except Exception as e:
+        print(f"Error inesperado al ejecutar {script_name}: {e}")
 
 
 def execute_script(script_name):
@@ -188,7 +178,7 @@ def execute_script(script_name):
     thread.start()
 
 
-
+# --- COMIENZO DE LA FUNCIÓN create_flippers_animation (VERSIÓN SOLICITADA) ---
 def create_flippers_animation(canvas):
     width = 200
     height = 200
@@ -269,13 +259,13 @@ def update_magnetometer(magnetometer_label):
     magnetometer_label.after(1000, update_magnetometer, magnetometer_label)
 
 
-def setup_cameras(indices, camera_frames):
+def setup_cameras(indices, camera_labels):
     caps = []
     for i, idx in enumerate(indices):
         cap = cv2.VideoCapture(idx)
         if cap.isOpened():
             caps.append(cap)
-            update_video(i, cap, camera_frames[i])
+            update_video(i, cap, camera_labels[i])
         else:
             print(f"Error al abrir la cámara con índice {idx}")
     return caps
@@ -284,6 +274,22 @@ def setup_cameras(indices, camera_frames):
 def update_video(index, cap, camera_label):
     ret, frame = cap.read()
     if ret:
+        label_width = camera_label.winfo_width()
+        label_height = camera_label.winfo_height()
+
+        if label_width > 1 and label_height > 1:
+            frame_height, frame_width, _ = frame.shape
+            aspect_ratio = frame_width / frame_height
+
+            if label_width / label_height > aspect_ratio:
+                new_height = label_height
+                new_width = int(new_height * aspect_ratio)
+            else:
+                new_width = label_width
+                new_height = int(new_width / aspect_ratio)
+
+            frame = cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_AREA)
+
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         frame_image = Image.fromarray(frame_rgb)
         frame_photo = ImageTk.PhotoImage(frame_image)
@@ -327,10 +333,14 @@ def create_lidar_gui():
 def update_frame_lidar(num):
     global lidar_line, lidar_ax, lidar_instance, lidar_fig
 
-    if lidar_instance == None or lidar_line == None or lidar_ax == None:
+    if lidar_instance is None or lidar_line is None or lidar_ax is None:
         return []
 
     try:
+        if not hasattr(lidar_instance, 'iter_scans'):
+            print("LIDAR instance no es un objeto RPLidar válido.")
+            return []
+
         scan = next(lidar_instance.iter_scans(
             max_buf_meas=LIDAR_SCAN_BUFFER,
             min_len=3
@@ -361,7 +371,8 @@ def update_frame_lidar(num):
 
         return lidar_line,
 
-    except (RPLidarException, StopIteration, RuntimeError) as e:
+    except (RPLidarException, StopIteration, RuntimeError, TypeError) as e:
+        print(f"Error en update_frame_lidar (LIDAR connection/data): {str(e)}")
         return lidar_line,
     except Exception as e:
         print(f"Error crítico en update_frame_lidar: {str(e)}")
@@ -389,133 +400,17 @@ def clean_shutdown_lidar():
         print(f"\nError en apagado del LIDAR: {str(e)}")
 
 
-# --- Funciones para el Diagrama Cinemático del Brazo Robótico ---
-def update_robot_arm(frame_num, L1, L2, L3, ax, line1, line2, line3, joint_points, poses, transition_frames):
-    global robot_arm_line1, robot_arm_line2, robot_arm_line3, robot_arm_joint_points
-
-    num_poses = len(poses)
-    total_animation_frames = num_poses * transition_frames
-
-    # Determine current and next pose based on frame_num
-    current_pose_idx = (frame_num // transition_frames) % num_poses
-    next_pose_idx = (current_pose_idx + 1) % num_poses
-    frame_in_transition = frame_num % transition_frames
-
-    start_angles = poses[current_pose_idx]
-    end_angles = poses[next_pose_idx]
-
-    # Linear interpolation of angles
-    t = frame_in_transition / transition_frames
-    theta1 = start_angles[0] + (end_angles[0] - start_angles[0]) * t
-    theta2 = start_angles[1] + (end_angles[1] - start_angles[1]) * t
-    theta3 = start_angles[2] + (end_angles[2] - start_angles[2]) * t
-
-    # Forward Kinematics (same as before)
-    x0, y0 = 0, 0  # Base (fixed at origin for simplicity)
-
-    # End of Link 1
-    x1 = L1 * np.cos(theta1)
-    y1 = L1 * np.sin(theta1)
-
-    # End of Link 2 (relative to end of Link 1)
-    x2 = x1 + L2 * np.cos(theta1 + theta2)
-    y2 = y1 + L2 * np.sin(theta1 + theta2)
-
-    # End of Link 3 (relative to end of Link 2)
-    x3 = x2 + L3 * np.cos(theta1 + theta2 + theta3)
-    y3 = y2 + L3 * np.sin(theta1 + theta2 + theta3)
-
-    # Update the lines
-    line1.set_data([x0, x1], [y0, y1])
-    line2.set_data([x1, x2], [y1, y2])
-    line3.set_data([x2, x3], [y2, y3])
-
-    # Update joint markers
-    joint_points.set_offsets([[x0, y0], [x1, y1], [x2, y2], [x3, y3]])
-
-    return line1, line2, line3, joint_points  # Return all artists for blitting
-
-
-def open_kinematic_diagram_window():
-    global robot_arm_fig, robot_arm_ax, robot_arm_line1, robot_arm_line2, robot_arm_line3, robot_arm_ani, robot_arm_joint_points
-
-    # Create a new Toplevel window
-    kinematic_window = ctk.CTkToplevel()
-    kinematic_window.title("Diagrama Cinemático del Brazo Robótico")
-    kinematic_window.geometry("600x600")  # Adjust size as needed
-    kinematic_window.configure(fg_color="black")  # Set background color
-
-    # Set up the Matplotlib figure and axes for the kinematic diagram
-    robot_arm_fig = plt.Figure(figsize=(5, 5), dpi=100, facecolor='black')
-    robot_arm_ax = robot_arm_fig.add_subplot(111)
-    robot_arm_ax.set_facecolor('black')
-
-    # Link lengths
-    L1, L2, L3 = 1.0, 0.8, 0.6  # Puedes ajustar estas longitudes
-
-    # Initialize the lines for the robot arm segments
-    robot_arm_line1, = robot_arm_ax.plot([], [], '-', lw=4, color='cyan', label='Link 1')
-    robot_arm_line2, = robot_arm_ax.plot([], [], '-', lw=4, color='#00ffff', label='Link 2')
-    robot_arm_line3, = robot_arm_ax.plot([], [], '-', lw=4, color='white', label='Link 3')
-
-    # Plot origin and joint points as a scatter plot
-    robot_arm_joint_points = robot_arm_ax.scatter([], [], color='red', s=100, zorder=5)  # Larger points for joints
-
-    # Set axis limits
-    ax_limit = L1 + L2 + L3 + 0.5  # A bit of padding
-    robot_arm_ax.set_xlim([-ax_limit, ax_limit])
-    robot_arm_ax.set_ylim([-ax_limit, ax_limit])
-    robot_arm_ax.set_aspect('equal', adjustable='box')  # Keep aspect ratio square
-
-    # Set labels and title
-    robot_arm_ax.set_xlabel("X-axis", color='white')
-    robot_arm_ax.set_ylabel("Y-axis", color='white')
-    robot_arm_ax.set_title("Diagrama Cinemático 3 DoF", color='white', fontsize=16)
-    robot_arm_ax.tick_params(axis='x', colors='white')
-    robot_arm_ax.tick_params(axis='y', colors='white')
-    robot_arm_ax.grid(True, color='gray', linestyle='--', alpha=0.5)
-
-    # Embed the Matplotlib figure into the Tkinter window
-    canvas_tkagg = FigureCanvasTkAgg(robot_arm_fig, master=kinematic_window)
-    canvas_tkagg.draw()
-    canvas_tkagg.get_tk_widget().pack(side=ctk.TOP, fill=ctk.BOTH, expand=True)
-
-    # Animation
-    total_frames_for_animation = len(ROBOT_ARM_POSES) * POSE_TRANSITION_FRAMES
-    robot_arm_ani = animation.FuncAnimation(
-        robot_arm_fig,
-        update_robot_arm,
-        frames=total_frames_for_animation,  # Total frames for one full cycle
-        fargs=(L1, L2, L3, robot_arm_ax, robot_arm_line1, robot_arm_line2, robot_arm_line3, robot_arm_joint_points,
-               ROBOT_ARM_POSES, POSE_TRANSITION_FRAMES),
-        interval=50,  # Milliseconds between frames
-        blit=True,  # Optimized drawing
-        repeat=True  # Loop animation
-    )
-
-    # Function to stop animation when window is closed
-    def on_kinematic_window_close():
-        global robot_arm_ani
-        if robot_arm_ani:
-            robot_arm_ani.event_source.stop()
-            robot_arm_ani = None  # Clear reference
-        plt.close(robot_arm_fig)  # Close the matplotlib figure to free resources
-        kinematic_window.destroy()
-
-    kinematic_window.protocol("WM_DELETE_WINDOW", on_kinematic_window_close)
-    # kinematic_window.mainloop() # Do not call mainloop here, let the main root handle it
-
-
 def on_closing(root):
     print("Cerrando aplicación...")
     stop_lidar_animation()
-    global robot_arm_ani
-    if robot_arm_ani:
-        robot_arm_ani.event_source.stop()
-        robot_arm_ani = None
-        # plt.close(robot_arm_fig) # Closing the figure here might cause issues if window is already destroyed
+    # Las variables del brazo robótico ya no son globales aquí
+    # global robot_arm_ani # ELIMINADO
+    # if robot_arm_ani: # ELIMINADO
+    #     robot_arm_ani.event_source.stop() # ELIMINADO
+    #     robot_arm_ani = None # ELIMINADO
 
-    if ser.is_open:
+    global ser  # Asegurarse de referenciar la variable global 'ser'
+    if ser and ser.is_open:  # Verificar si 'ser' existe y está abierto
         try:
             ser.close()
             print("Conexión serial ESP32 cerrada.")
@@ -537,10 +432,11 @@ def create_gui():
     icon_path = "/home/elian/PycharmProjects/PythonProject1/.venv/elbueno.ico"
     try:
         icon_image = Image.open(icon_path)
+        # Para wm_iconphoto, se necesita el PhotoImage de PIL/Pillow directamente.
         icon_photo = ImageTk.PhotoImage(icon_image)
-        root.tk.call('wm', 'iconphoto', root._w, icon_photo)
+        root.wm_iconphoto(True, icon_photo)
     except Exception as e:
-        print(f"Error al cargar el ícono: {e}")
+        print(f"Error al cargar el ícono '{icon_path}': {e}")
 
     header_frame = ctk.CTkFrame(root, height=100, fg_color="black")
     header_frame.pack(fill="x")
@@ -568,12 +464,18 @@ def create_gui():
     magnetometer_label.pack(padx=10, pady=5)
     update_magnetometer(magnetometer_label)
 
-    logo_image = Image.open("/home/elian/PycharmProjects/PythonProject1/.venv/nixlogo.png")
-    logo_image = logo_image.resize((120, 120), Image.Resampling.LANCZOS)
-    logo_photo = ImageTk.PhotoImage(logo_image)
-    logo_label = ctk.CTkLabel(header_frame, image=logo_photo, text="")
-    logo_label.image = logo_photo
-    logo_label.pack(side="right", padx=20)
+    logo_image_path = "/home/elian/PycharmProjects/PythonProject1/.venv/nixlogo.png"
+    try:
+        logo_image = Image.open(logo_image_path)
+        logo_image = logo_image.resize((90, 90), Image.Resampling.LANCZOS)
+        logo_photo = ImageTk.PhotoImage(logo_image)
+        logo_label = ctk.CTkLabel(header_frame, image=logo_photo, text="")
+        logo_label.image = logo_photo
+        logo_label.pack(side="right", padx=20)
+    except Exception as e:
+        print(f"Error al cargar el logo '{logo_image_path}': {e}")
+        logo_label = ctk.CTkLabel(header_frame, text="[Logo]", font=("Arial", 14), text_color="gray")
+        logo_label.pack(side="right", padx=20)
 
     button_frame = ctk.CTkFrame(root, height=50, fg_color="black")
     button_frame.pack(fill="x")
@@ -583,7 +485,7 @@ def create_gui():
         ("Cámara Térmica", lambda: execute_script("thermalCamera.py")),
         ("YOLOv10", lambda: execute_script("runyolov10.py")),
         ("SLAM", lambda: execute_script("slam.py")),
-        ("Diagrama Cinemático", open_kinematic_diagram_window),
+        ("Diagrama Cinemático", lambda: execute_script("kinematic_diagram.py")), # Llama al nuevo script
     ]
 
     for text, command in buttons:
@@ -595,12 +497,15 @@ def create_gui():
     camera_indices = []
 
     def save_indices():
-        indices = camera_input.get()
-        camera_indices.clear()
-        camera_indices.extend(map(int, indices.split(",")))
-        setup_cameras(camera_indices, camera_labels)
+        indices_str = camera_input.get()
+        if all(part.strip().isdigit() for part in indices_str.split(',')):
+            camera_indices.clear()
+            camera_indices.extend(map(int, indices_str.split(",")))
+            setup_cameras(camera_indices, camera_labels)
+        else:
+            print("Entrada de índices de cámara inválida. Por favor, introduce números separados por comas (ej: 0,1).")
 
-    camera_input = ctk.CTkEntry(header_frame, width=300, placeholder_text="Índices de cámaras (ej: 1,2)",
+    camera_input = ctk.CTkEntry(header_frame, width=300, placeholder_text="Índices de cámaras (ej: 0,1)",
                                 font=("Arial", 14), fg_color="white", text_color="black")
     camera_input.pack(side="right", padx=10)
 
@@ -612,18 +517,16 @@ def create_gui():
     main_frame = ctk.CTkFrame(root, fg_color="black")
     main_frame.pack(expand=True, fill="both")
     main_frame.grid_rowconfigure(1, weight=1)
-    main_frame.grid_columnconfigure(0, weight=3)  # Cámara principal (más ancha)
-    main_frame.grid_columnconfigure(1, weight=1)  # Columna de widgets (más estrecha)
+    main_frame.grid_columnconfigure(0, weight=3)
+    main_frame.grid_columnconfigure(1, weight=1)
 
     camera_labels = []
-    for i in range(1):
-        frame = ctk.CTkFrame(main_frame, fg_color="#1e1e1e", corner_radius=17)
-        frame.grid(row=i // 2, column=i % 2, padx=10, pady=10, sticky="nsew")
-        label = ctk.CTkLabel(frame, text=f"Cámara {i + 1}", font=("Arial", 18, "bold"), text_color="white")
-        label.pack(expand=True, fill="both")
-        camera_labels.append(label)
+    camera_main_frame = ctk.CTkFrame(main_frame, fg_color="#1e1e1e", corner_radius=17)
+    camera_main_frame.grid(row=0, column=0, rowspan=2, padx=10, pady=10, sticky="nsew")
+    camera_label_main = ctk.CTkLabel(camera_main_frame, text="Cámara Principal", font=("Arial", 18, "bold"), text_color="white")
+    camera_label_main.pack(expand=True, fill="both")
+    camera_labels.append(camera_label_main)
 
-    # --- WIDGETS COLUMN (RIGHT SIDE) ---
     widget_frame = ctk.CTkFrame(main_frame, fg_color="black", corner_radius=17)
     widget_frame.grid(row=0, column=1, rowspan=2, padx=10, pady=10, sticky="nsew")
     widget_frame.grid_rowconfigure((0, 1), weight=1)
@@ -636,13 +539,13 @@ def create_gui():
 
     flipper_label = ctk.CTkLabel(flipper_frame, text="Estado Flippers", font=("Arial", 18, "bold"),
                                  text_color="white")
-    flipper_label.pack()
+    flipper_label.pack(pady=5)
 
-    flipper_canvas = ctk.CTkCanvas(flipper_frame, width=280, height=200, bg="#1e1e1e", highlightthickness=0)
-    flipper_canvas.pack()
-    create_flippers_animation(flipper_canvas)
+    flipper_canvas = ctk.CTkCanvas(flipper_frame, bg="#1e1e1e", highlightthickness=0)
+    flipper_canvas.pack(expand=True, fill="both")
+    root.after(100, lambda: create_flippers_animation(flipper_canvas))
 
-    # --- LIDAR Visualization Widget ---
+    # LIDAR Visualization Widget
     lidar_frame = ctk.CTkFrame(widget_frame, fg_color="#1e1e1e", corner_radius=17, border_width=2,
                                border_color=colorTheme)
     lidar_frame.grid(row=1, column=0, pady=10, padx=10, sticky="nsew")
