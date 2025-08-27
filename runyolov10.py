@@ -8,7 +8,7 @@ import math
 model = YOLOv10('NixitoS.pt')
 
 # Inicializa los anotadores para las cajas de detección y las etiquetas
-boundingBoxAnnotator = sv.BoundingBoxAnnotator()
+boundingBoxAnnotator = sv.RoundBoxAnnotator()
 labelAnnotator = sv.LabelAnnotator()
 
 # Abre la webcam
