@@ -50,3 +50,8 @@ Scripts auxiliares gestionados por hilos:
 -thermalCamera.py
 -runyolov10.py
 -slam.py
+
+
+En caso de tener un inconveniente con Numpy, ejecutar las siguientes lineas en la terminal. 
+ - pip uninstall numpy
+ - pip install "numpy<2"
